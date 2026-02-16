@@ -28,7 +28,7 @@ from sqlalchemy import desc
 
 from db import engine, get_db
 from models import Base, Symbol, Scan, Fundamental, Technical, Recommendation, ScanLog
-from scanner import run_scan
+from scanner import _process_symbol, CONCURRENCY_LIMIT
 
 # ──────────────────────────────────────────────
 # Logging
@@ -95,6 +95,25 @@ def _read_symbols_file() -> List[str]:
     return symbols
 
 
+def _delete_all_records(db: Session) -> dict:
+    """Delete all rows from all tables and return counts."""
+    deleted_logs = db.query(ScanLog).delete()
+    deleted_recs = db.query(Recommendation).delete()
+    deleted_tech = db.query(Technical).delete()
+    deleted_fund = db.query(Fundamental).delete()
+    deleted_scans = db.query(Scan).delete()
+    deleted_symbols = db.query(Symbol).delete()
+    db.commit()
+    return {
+        "scan_logs": deleted_logs,
+        "recommendations": deleted_recs,
+        "technicals": deleted_tech,
+        "fundamentals": deleted_fund,
+        "scans": deleted_scans,
+        "symbols": deleted_symbols,
+    }
+
+
 # ──────────────────────────────────────────────
 # Routes
 # ──────────────────────────────────────────────
@@ -128,6 +147,9 @@ def reload_symbols(db: Session = Depends(get_db)):
 # Background scan state (simple in‑memory flag for the single‑worker case)
 _scan_running = False
 
+# In-memory progress tracking:  scan_id → { total, skipped, completed, current_symbol, errors }
+_scan_progress: dict = {}
+
 
 @app.post("/api/scan/run")
 async def start_scan(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
@@ -159,12 +181,37 @@ async def start_scan(background_tasks: BackgroundTasks, db: Session = Depends(ge
     return {"scan_id": scan_id}
 
 
+@app.get("/api/scan/active")
+def get_active_scan(db: Session = Depends(get_db)):
+    """Check if there is a currently running scan (for page-load recovery)."""
+    if _scan_running:
+        # Find the running scan row
+        scan = db.query(Scan).filter_by(status="running").order_by(desc(Scan.id)).first()
+        if scan:
+            progress = _scan_progress.get(scan.id)
+            return {
+                "active": True,
+                "scan_id": scan.id,
+                "status": "running",
+                "progress": progress,
+            }
+    return {"active": False, "scan_id": None, "status": None, "progress": None}
+
+
+@app.delete("/api/admin/clear-all")
+def clear_all_records(confirm: bool = Query(False), db: Session = Depends(get_db)):
+    """Delete all records from all tables. Requires confirm=true."""
+    if not confirm:
+        raise HTTPException(status_code=400, detail="confirm=true is required")
+    deleted = _delete_all_records(db)
+    return {"status": "ok", "deleted": deleted}
+
+
 async def run_scan_for_id(scan_id: int):
     """Run the scanner and update the pre-created scan row."""
     from db import get_db_context
     from models import Scan, Symbol
     import httpx
-    from scanner import _process_symbol, CONCURRENCY_LIMIT
 
     with get_db_context() as db:
         symbols = db.query(Symbol).all()
@@ -226,6 +273,7 @@ async def run_scan_for_id(scan_id: int):
                         "pe": fund.pe,
                         "roce": fund.roce,
                         "bv": fund.bv,
+                        "debt": fund.debt,
                         "industry": fund.industry,
                     }
 
@@ -269,8 +317,27 @@ async def run_scan_for_id(scan_id: int):
         scan_id, len(to_process), len(skip_results),
     )
 
+    # Initialise progress tracking
+    _scan_progress[scan_id] = {
+        "total": len(symbol_list),
+        "to_process": len(to_process),
+        "skipped": len(skip_results),
+        "completed": 0,
+        "current_symbol": None,
+        "errors": 0,
+    }
+
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
     logger.info("Scan %d: starting processing with concurrency=%d", scan_id, CONCURRENCY_LIMIT)
+
+    async def _tracked_process(stub, scan_id, client, semaphore):
+        """Wrap _process_symbol to update progress tracking."""
+        _scan_progress[scan_id]["current_symbol"] = stub.symbol
+        result = await _process_symbol(stub, scan_id, client, semaphore)
+        _scan_progress[scan_id]["completed"] += 1
+        if isinstance(result, dict) and result.get("status") == "error":
+            _scan_progress[scan_id]["errors"] += 1
+        return result
 
     async with httpx.AsyncClient(verify=False) as client:
         tasks = []
@@ -280,7 +347,7 @@ async def run_scan_for_id(scan_id: int):
             stub = _SymStub()
             stub.id = sid
             stub.symbol = sym_str
-            tasks.append(_process_symbol(stub, scan_id, client, semaphore))
+            tasks.append(_tracked_process(stub, scan_id, client, semaphore))
 
         logger.info("Scan %d: awaiting %d symbol tasks...", scan_id, len(tasks))
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -332,6 +399,7 @@ async def run_scan_for_id(scan_id: int):
                         pe=fund_snapshot.get("pe"),
                         roce=fund_snapshot.get("roce"),
                         bv=fund_snapshot.get("bv"),
+                        debt=fund_snapshot.get("debt"),
                         industry=fund_snapshot.get("industry"),
                     ))
 
@@ -380,6 +448,7 @@ async def run_scan_for_id(scan_id: int):
                     pe=fd.pe,
                     roce=fd.roce,
                     bv=fd.bv,
+                    debt=fd.debt,
                     industry=fd.industry,
                 ))
 
@@ -451,17 +520,29 @@ async def run_scan_for_id(scan_id: int):
             sc.error_message = "; ".join(errors[:10])
             logger.warning("Scan %d had %d errors: %s", scan_id, len(errors), sc.error_message)
 
+    # Mark progress as complete (keep for a short while so frontend can read final state)
+    if scan_id in _scan_progress:
+        _scan_progress[scan_id]["current_symbol"] = None
+        _scan_progress[scan_id]["completed"] = _scan_progress[scan_id]["to_process"]
+
     logger.info("═══ Scan %d COMPLETED ═══  errors=%d", scan_id, len(errors))
+
+    # Clean up progress after a delay (let final poll read it)
+    async def _cleanup_progress():
+        await asyncio.sleep(30)
+        _scan_progress.pop(scan_id, None)
+    asyncio.ensure_future(_cleanup_progress())
 
 
 @app.get("/api/scan/{scan_id}")
 def get_scan(scan_id: int, db: Session = Depends(get_db)):
-    """Return scan status and summary counts."""
+    """Return scan status, summary counts, and live progress if running."""
     scan = db.query(Scan).get(scan_id)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     total = db.query(Recommendation).filter_by(scan_id=scan_id).count()
     recommended = db.query(Recommendation).filter_by(scan_id=scan_id, recommended=True).count()
+    progress = _scan_progress.get(scan_id)
     return {
         "scan_id": scan.id,
         "status": scan.status,
@@ -470,6 +551,7 @@ def get_scan(scan_id: int, db: Session = Depends(get_db)):
         "error_message": scan.error_message,
         "total_symbols": total,
         "recommended_count": recommended,
+        "progress": progress,
     }
 
 
@@ -559,19 +641,27 @@ def latest_recommendations(db: Session = Depends(get_db)):
     if not scan:
         return {"scan_id": None, "scan_status": None, "recommendations": []}
     recs = (
-        db.query(Recommendation, Fundamental, Symbol)
+        db.query(Recommendation, Fundamental, Technical, Symbol)
         .join(Symbol, Recommendation.symbol_id == Symbol.id)
         .outerjoin(
             Fundamental,
             (Fundamental.scan_id == Recommendation.scan_id)
             & (Fundamental.symbol_id == Recommendation.symbol_id),
         )
+        .outerjoin(
+            Technical,
+            (Technical.scan_id == Recommendation.scan_id)
+            & (Technical.symbol_id == Recommendation.symbol_id),
+        )
         .filter(Recommendation.scan_id == scan.id, Recommendation.recommended == True)
         .order_by(desc(Recommendation.score))
         .all()
     )
     rows = []
-    for rec, fund, sym in recs:
+    for rec, fund, tech, sym in recs:
+        signals = json.loads(tech.signals_json) if tech and tech.signals_json else {}
+        rsi_div = "Bullish" if signals.get("rsi_divergence") else "Bearing"
+        macd_div = "Bullish" if signals.get("macd_divergence") else "Bearing"
         rows.append({
             "symbol": sym.symbol,
             "stock_name": fund.name if fund else None,
@@ -579,7 +669,10 @@ def latest_recommendations(db: Session = Depends(get_db)):
             "pe": fund.pe if fund else None,
             "roce": fund.roce if fund else None,
             "bv": fund.bv if fund else None,
+            "debt": fund.debt if fund else None,
             "industry": fund.industry if fund else None,
+            "rsi_divergence": rsi_div,
+            "macd_divergence": macd_div,
             "score": rec.score,
             "reason": rec.reason,
         })
@@ -617,6 +710,9 @@ def latest_all(db: Session = Depends(get_db)):
     )
     rows = []
     for rec, fund, tech, sym in recs:
+        signals = json.loads(tech.signals_json) if tech and tech.signals_json else {}
+        rsi_div = "Bullish" if signals.get("rsi_divergence") else "Bearing"
+        macd_div = "Bullish" if signals.get("macd_divergence") else "Bearing"
         rows.append({
             "symbol": sym.symbol,
             "stock_name": fund.name if fund else None,
@@ -624,12 +720,15 @@ def latest_all(db: Session = Depends(get_db)):
             "pe": fund.pe if fund else None,
             "roce": fund.roce if fund else None,
             "bv": fund.bv if fund else None,
+            "debt": fund.debt if fund else None,
             "industry": fund.industry if fund else None,
             "rsi14": tech.rsi14 if tech else None,
             "macd": tech.macd if tech else None,
             "macd_signal": tech.macd_signal if tech else None,
             "sma20": tech.sma20 if tech else None,
             "close": tech.close if tech else None,
+            "rsi_divergence": rsi_div,
+            "macd_divergence": macd_div,
             "recommended": rec.recommended,
             "score": rec.score,
             "reason": rec.reason,
@@ -683,6 +782,7 @@ def symbol_details(
         "pe": fund.pe if fund else None,
         "roce": fund.roce if fund else None,
         "bv": fund.bv if fund else None,
+        "debt": fund.debt if fund else None,
         "industry": fund.industry if fund else None,
         "rsi14": tech.rsi14 if tech else None,
         "macd": tech.macd if tech else None,

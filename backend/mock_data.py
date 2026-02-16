@@ -29,20 +29,20 @@ logger = logging.getLogger(__name__)
 
 _FUNDAMENTALS: Dict[str, dict] = {
     "TCS": dict(name="Tata Consultancy Services", cmp=3852.40, pe=28.54,
-                roce=52.3, bv=285.20, industry="IT Services"),
+                roce=52.3, bv=285.20, debt=12000.0, industry="IT Services"),
     "INFY": dict(name="Infosys Limited", cmp=1523.75, pe=25.18,
-                 roce=36.82, bv=220.45, industry="IT Services"),
+                 roce=36.82, bv=220.45, debt=3800.0, industry="IT Services"),
     "NMDC": dict(name="NMDC Limited", cmp=127.30, pe=8.42,
-                 roce=22.10, bv=95.60, industry="Mining & Minerals"),
+                 roce=22.10, bv=95.60, debt=4200.0, industry="Mining & Minerals"),
     "TECHM": dict(name="Tech Mahindra Limited", cmp=1342.90, pe=32.05,
-                  roce=14.50, bv=380.10, industry="IT Services"),
+                  roce=14.50, bv=380.10, debt=9100.0, industry="IT Services"),
     "WIPRO": dict(name="Wipro Limited", cmp=452.15, pe=22.78,
-                  roce=18.92, bv=130.80, industry="IT Services"),
+                  roce=18.92, bv=130.80, debt=6200.0, industry="IT Services"),
 }
 
 # Default template for unknown symbols
 _DEFAULT_FUNDAMENTAL = dict(name=None, cmp=500.0, pe=18.0,
-                            roce=15.0, bv=120.0, industry="General")
+                            roce=15.0, bv=120.0, debt=2500.0, industry="General")
 
 
 def _seeded_rng(symbol: str, seed_extra: str = "") -> random.Random:
@@ -154,10 +154,11 @@ def mock_fundamentals(symbol: str) -> FundamentalData:
         pe=info["pe"],
         roce=info["roce"],
         bv=info["bv"],
+        debt=info["debt"],
         industry=info["industry"],
     )
-    logger.info("[%s] ★ Using MOCK fundamentals: name=%s cmp=%.2f pe=%.2f",
-                symbol, fd.name, fd.cmp or 0, fd.pe or 0)
+    logger.info("[%s] ★ Using MOCK fundamentals: name=%s cmp=%.2f pe=%.2f debt=%.2f",
+                symbol, fd.name, fd.cmp or 0, fd.pe or 0, fd.debt or 0)
     return fd
 
 

@@ -57,6 +57,7 @@ class Fundamental(Base):
     pe = Column(Float, nullable=True)
     roce = Column(Float, nullable=True)
     bv = Column(Float, nullable=True)
+    debt = Column(Float, nullable=True)
     industry = Column(String(256), nullable=True)
     fetched_at = Column(DateTime, default=_utcnow)
 

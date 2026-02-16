@@ -21,14 +21,10 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import httpx
-from sqlalchemy.orm import Session
 
-from db import get_db_context
-from models import Scan, Symbol, Fundamental, Technical, Recommendation
 from google_finance import (
     FundamentalData,
     PriceBar,
@@ -36,6 +32,7 @@ from google_finance import (
     fetch_price_history,
 )
 from indicators import rsi, macd, sma, MACDResult
+from models import Symbol
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +57,8 @@ def _detect_signals(
         "macd_crossover": False,
         "sma20_cross": False,
         "rsi_rising_3d": False,
+        "rsi_divergence": False,
+        "macd_divergence": False,
         "latest_rsi": None,
         "latest_macd": None,
         "latest_signal": None,
@@ -125,6 +124,45 @@ def _detect_signals(
         if tail[0] < tail[1] < tail[2]:
             signals["rsi_rising_3d"] = True
 
+    # 3. Divergence in last *lookback* days (bullish)
+    # Price makes a lower low, indicator makes a higher low.
+    if n >= lookback * 2:
+        recent_prices = closes[-lookback:]
+        prev_prices = closes[-(lookback * 2):-lookback]
+
+        recent_low = min(recent_prices) if recent_prices else None
+        prev_low = min(prev_prices) if prev_prices else None
+
+        recent_rsi = [v for v in rsi_series[-lookback:] if v is not None]
+        prev_rsi = [v for v in rsi_series[-(lookback * 2):-lookback] if v is not None]
+        recent_rsi_low = min(recent_rsi) if recent_rsi else None
+        prev_rsi_low = min(prev_rsi) if prev_rsi else None
+
+        recent_macd = [v for v in macd_result.macd_line[-lookback:] if v is not None]
+        prev_macd = [v for v in macd_result.macd_line[-(lookback * 2):-lookback] if v is not None]
+        recent_macd_low = min(recent_macd) if recent_macd else None
+        prev_macd_low = min(prev_macd) if prev_macd else None
+
+        if (
+            recent_low is not None
+            and prev_low is not None
+            and recent_low < prev_low
+            and recent_rsi_low is not None
+            and prev_rsi_low is not None
+            and recent_rsi_low > prev_rsi_low
+        ):
+            signals["rsi_divergence"] = True
+
+        if (
+            recent_low is not None
+            and prev_low is not None
+            and recent_low < prev_low
+            and recent_macd_low is not None
+            and prev_macd_low is not None
+            and recent_macd_low > prev_macd_low
+        ):
+            signals["macd_divergence"] = True
+
     return signals
 
 
@@ -137,6 +175,8 @@ def _score_and_reason(signals: Dict) -> Tuple[float, bool, str]:
         signals["macd_crossover"]
         or signals["sma20_cross"]
         or signals["rsi_rising_3d"]
+        or signals["rsi_divergence"]
+        or signals["macd_divergence"]
     )
 
     if not has_confirmation:
@@ -157,6 +197,12 @@ def _score_and_reason(signals: Dict) -> Tuple[float, bool, str]:
     if signals["rsi_rising_3d"]:
         score += 1
         reasons.append("RSI rising 3 consecutive days")
+    if signals["rsi_divergence"]:
+        score += 1
+        reasons.append("RSI bullish divergence (5d)")
+    if signals["macd_divergence"]:
+        score += 2
+        reasons.append("MACD bullish divergence (5d)")
 
     # Bonus: (30 - RSI) capped at 5
     if rsi_val is not None:
@@ -230,12 +276,14 @@ async def _process_symbol(
             signals.get('latest_close') or 0,
         )
         logger.info(
-            "[%s] Signals → rsi_oversold=%s  macd_crossover=%s  sma20_cross=%s  rsi_rising_3d=%s",
+            "[%s] Signals → rsi_oversold=%s  macd_crossover=%s  sma20_cross=%s  rsi_rising_3d=%s  rsi_divergence=%s  macd_divergence=%s",
             sym,
             signals.get('rsi_oversold'),
             signals.get('macd_crossover'),
             signals.get('sma20_cross'),
             signals.get('rsi_rising_3d'),
+            signals.get('rsi_divergence'),
+            signals.get('macd_divergence'),
         )
         if recommended:
             logger.info("[%s] ★ RECOMMENDED  score=%.2f  reason='%s'", sym, score, reason)
@@ -263,127 +311,3 @@ async def _process_symbol(
 
     logger.debug("[%s] _process_symbol done", sym)
     return result
-
-
-# ──────────────────────────────────────────────
-# Full scan orchestration
-# ──────────────────────────────────────────────
-
-async def run_scan() -> int:
-    """Execute a full scan.  Returns the scan ID."""
-
-    # Create scan record
-    with get_db_context() as db:
-        scan = Scan(status="running")
-        db.add(scan)
-        db.flush()
-        scan_id = scan.id
-
-        symbols = db.query(Symbol).all()
-        symbol_list = [(s.id, s.symbol, s) for s in symbols]
-
-    if not symbol_list:
-        with get_db_context() as db:
-            sc = db.query(Scan).get(scan_id)
-            sc.status = "completed"
-            sc.finished_at = datetime.now(timezone.utc)
-        return scan_id
-
-    semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-
-    async with httpx.AsyncClient() as client:
-        tasks = []
-        for sid, sym_str, sym_obj in symbol_list:
-            # Recreate a lightweight object to avoid detached‑session issues
-            class _SymStub:
-                pass
-            stub = _SymStub()
-            stub.id = sid
-            stub.symbol = sym_str
-            tasks.append(_process_symbol(stub, scan_id, client, semaphore))
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    # Persist results
-    errors = []
-    with get_db_context() as db:
-        for res in results:
-            if isinstance(res, Exception):
-                errors.append(str(res))
-                continue
-
-            sym_id = res["symbol_id"]
-
-            # Fundamentals
-            fd = res.get("fundamentals")
-            if fd:
-                db.add(Fundamental(
-                    scan_id=scan_id,
-                    symbol_id=sym_id,
-                    name=fd.name,
-                    cmp=fd.cmp,
-                    pe=fd.pe,
-                    roce=fd.roce,
-                    bv=fd.bv,
-                    industry=fd.industry,
-                ))
-
-            # Technicals
-            signals = res.get("signals", {})
-            price_bars = res.get("price_bars", [])
-
-            # Build series JSON for charting
-            price_series = [{"date": b.date, "close": b.close} for b in price_bars] if price_bars else []
-            rsi_s = res.get("rsi_series", [])
-            macd_r = res.get("macd_result")
-
-            rsi_chart = []
-            macd_chart = []
-            if price_bars and rsi_s:
-                for i, b in enumerate(price_bars):
-                    if i < len(rsi_s) and rsi_s[i] is not None:
-                        rsi_chart.append({"date": b.date, "rsi": round(rsi_s[i], 2)})
-            if price_bars and macd_r:
-                for i, b in enumerate(price_bars):
-                    entry = {"date": b.date}
-                    if i < len(macd_r.macd_line) and macd_r.macd_line[i] is not None:
-                        entry["macd"] = round(macd_r.macd_line[i], 4)
-                    if i < len(macd_r.signal_line) and macd_r.signal_line[i] is not None:
-                        entry["signal"] = round(macd_r.signal_line[i], 4)
-                    if i < len(macd_r.histogram) and macd_r.histogram[i] is not None:
-                        entry["histogram"] = round(macd_r.histogram[i], 4)
-                    if len(entry) > 1:
-                        macd_chart.append(entry)
-
-            db.add(Technical(
-                scan_id=scan_id,
-                symbol_id=sym_id,
-                rsi14=signals.get("latest_rsi"),
-                macd=signals.get("latest_macd"),
-                macd_signal=signals.get("latest_signal"),
-                sma20=signals.get("latest_sma20"),
-                close=signals.get("latest_close"),
-                signals_json=json.dumps(signals),
-                price_series_json=json.dumps(price_series),
-                rsi_series_json=json.dumps(rsi_chart),
-                macd_series_json=json.dumps(macd_chart),
-            ))
-
-            # Recommendation
-            db.add(Recommendation(
-                scan_id=scan_id,
-                symbol_id=sym_id,
-                recommended=res.get("recommended", False),
-                score=res.get("score", 0.0),
-                reason=res.get("reason", ""),
-            ))
-
-        # Finalise scan
-        sc = db.query(Scan).get(scan_id)
-        sc.finished_at = datetime.now(timezone.utc)
-        sc.status = "completed"
-        if errors:
-            sc.error_message = "; ".join(errors[:10])
-
-    logger.info("Scan %d completed", scan_id)
-    return scan_id

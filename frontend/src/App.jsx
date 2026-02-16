@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import ScanControls from './components/ScanControls';
 import RecommendationsTable from './components/RecommendationsTable';
 import StockDetailsModal from './components/StockDetailsModal';
-import { getLatest, getLatestAll, getScan, deleteFromLatestScan, deleteFromScan } from './api';
+import { getLatest, getLatestAll, getScan, getActiveScan, deleteFromLatestScan, deleteFromScan } from './api';
 
 export default function App() {
   const [data, setData] = useState(null);           // latest recommended
@@ -27,7 +27,30 @@ export default function App() {
     }
   }, [showAll]);
 
-  useEffect(() => { refresh(); }, []);
+  const handleRefreshAfterClear = useCallback(async () => {
+    setData(null);
+    setAllData(null);
+    setScanStatus(null);
+    setSelectedSymbol(null);
+    await refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    refresh();
+    // Check if a scan is already running (page-load recovery)
+    (async () => {
+      try {
+        const active = await getActiveScan();
+        if (active.active && active.scan_id) {
+          setScanId(active.scan_id);
+          setScanStatus({ scan_id: active.scan_id, status: 'running', progress: active.progress });
+          startPolling(active.scan_id);
+        }
+      } catch (e) {
+        // ignore – no active scan
+      }
+    })();
+  }, []);
 
   // Poll scan status while running
   const startPolling = useCallback((id) => {
@@ -48,7 +71,7 @@ export default function App() {
       } catch (e) {
         console.warn('[App] poll error:', e);
       }
-    }, 3000);
+    }, 1500);
   }, [refresh]);
 
   const onScanStarted = useCallback((id) => {
@@ -111,12 +134,12 @@ export default function App() {
         </div>
       </header>
 
-      <main className="container">
+      <main className="container full-screen">
         {error && <div className="error-msg">{error}</div>}
 
         <ScanControls
           onScanStarted={onScanStarted}
-          onRefresh={refresh}
+          onRefresh={handleRefreshAfterClear}
           scanStatus={scanStatus}
           setError={setError}
         />

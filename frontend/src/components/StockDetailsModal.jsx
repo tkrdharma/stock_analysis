@@ -40,6 +40,8 @@ export default function StockDetailsModal({ symbol, scanId, onClose }) {
     { key: 'macd_crossover', label: 'MACD Bullish Crossover' },
     { key: 'sma20_cross', label: 'Close > SMA20 Cross' },
     { key: 'rsi_rising_3d', label: 'RSI Rising 3 Days' },
+    { key: 'rsi_divergence', label: 'RSI Bullish Divergence (5d)' },
+    { key: 'macd_divergence', label: 'MACD Bullish Divergence (5d)' },
   ];
 
   return (
@@ -74,6 +76,10 @@ export default function StockDetailsModal({ symbol, scanId, onClose }) {
                 <div className="detail-item">
                   <div className="label">Book Value</div>
                   <div className="value">{fmt(data.bv)}</div>
+                </div>
+                <div className="detail-item">
+                  <div className="label">Debt</div>
+                  <div className="value">{fmt(data.debt)}</div>
                 </div>
                 <div className="detail-item">
                   <div className="label">Industry</div>

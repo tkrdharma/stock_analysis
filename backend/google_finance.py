@@ -72,6 +72,7 @@ class FundamentalData:
     pe: Optional[float] = None
     roce: Optional[float] = None
     bv: Optional[float] = None
+    debt: Optional[float] = None
     industry: Optional[str] = None
 
 
@@ -228,6 +229,7 @@ async def fetch_fundamentals(
         fd.pe = _safe_float(kv.get("p/e ratio") or kv.get("pe ratio") or kv.get("p/e"))
         fd.bv = _safe_float(kv.get("book value") or kv.get("book value per share"))
         fd.roce = _safe_float(kv.get("roce") or kv.get("return on capital employed"))
+        fd.debt = _safe_float(kv.get("total debt") or kv.get("debt") or kv.get("net debt"))
 
         # Industry / Sector
         industry_tag = soup.select_one("a.py3Ok")
@@ -237,8 +239,8 @@ async def fetch_fundamentals(
             fd.industry = kv.get("industry") or kv.get("sector")
 
         logger.info(
-            "[%s] Fundamentals scraped → name=%s  cmp=%s  pe=%s  roce=%s  bv=%s  industry=%s",
-            symbol, fd.name, fd.cmp, fd.pe, fd.roce, fd.bv, fd.industry,
+            "[%s] Fundamentals scraped → name=%s  cmp=%s  pe=%s  roce=%s  bv=%s  debt=%s  industry=%s",
+            symbol, fd.name, fd.cmp, fd.pe, fd.roce, fd.bv, fd.debt, fd.industry,
         )
         if not fd.cmp:
             logger.warning("[%s] ⚠ CMP is None – price selector may have changed", symbol)

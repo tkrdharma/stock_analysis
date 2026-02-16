@@ -1,21 +1,13 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 
 const COLUMNS = [
-  { key: 'stock_name', label: 'Stock Name' },
   { key: 'symbol', label: 'Symbol' },
   { key: 'cmp', label: 'CMP', numeric: true },
   { key: 'pe', label: 'PE', numeric: true },
   { key: 'roce', label: 'ROCE', numeric: true },
-  { key: 'bv', label: 'BV', numeric: true },
-  { key: 'industry', label: 'Industry' },
-  { key: 'score', label: 'Score', numeric: true },
-  { key: 'reason', label: 'Reason' },
-];
-
-const ALL_EXTRA_COLUMNS = [
-  { key: 'rsi14', label: 'RSI(14)', numeric: true },
-  { key: 'close', label: 'Close', numeric: true },
-  { key: 'recommended', label: 'Rec?', numeric: false },
+  { key: 'debt', label: 'Debt', numeric: true },
+  { key: 'rsi_divergence', label: 'RSI Divergence' },
+  { key: 'macd_divergence', label: 'MACD Divergence' },
 ];
 
 function fmt(val, digits = 2) {
@@ -26,19 +18,18 @@ function fmt(val, digits = 2) {
 
 export default function RecommendationsTable({ rows, showAll, onRowClick, onDelete }) {
   const [search, setSearch] = useState('');
-  const [sortKey, setSortKey] = useState('score');
+  const [sortKey, setSortKey] = useState('symbol');
   const [sortAsc, setSortAsc] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
 
-  const cols = showAll ? [...COLUMNS.slice(0, 7), ...ALL_EXTRA_COLUMNS, ...COLUMNS.slice(7)] : COLUMNS;
+  const cols = COLUMNS;
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
     let arr = rows.filter(r =>
       !q ||
-      (r.symbol || '').toLowerCase().includes(q) ||
-      (r.stock_name || '').toLowerCase().includes(q) ||
-      (r.industry || '').toLowerCase().includes(q) ||
-      (r.reason || '').toLowerCase().includes(q)
+      (r.symbol || '').toLowerCase().includes(q)
     );
     arr.sort((a, b) => {
       let va = a[sortKey], vb = b[sortKey];
@@ -53,6 +44,20 @@ export default function RecommendationsTable({ rows, showAll, onRowClick, onDele
     return arr;
   }, [rows, search, sortKey, sortAsc]);
 
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const startIdx = (safePage - 1) * pageSize;
+  const endIdx = startIdx + pageSize;
+  const paged = filtered.slice(startIdx, endIdx);
+
+  const resetPageIfNeeded = () => {
+    if (page !== 1) setPage(1);
+  };
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
   const toggleSort = (key) => {
     if (sortKey === key) {
       setSortAsc(!sortAsc);
@@ -60,6 +65,7 @@ export default function RecommendationsTable({ rows, showAll, onRowClick, onDele
       setSortKey(key);
       setSortAsc(false);
     }
+    resetPageIfNeeded();
   };
 
   if (!rows.length) {
@@ -77,11 +83,47 @@ export default function RecommendationsTable({ rows, showAll, onRowClick, onDele
           className="search-box"
           placeholder="Search stocks..."
           value={search}
-          onChange={e => setSearch(e.target.value)}
+          onChange={e => {
+            setSearch(e.target.value);
+            resetPageIfNeeded();
+          }}
         />
         <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
           {filtered.length} result{filtered.length !== 1 ? 's' : ''}
         </span>
+        <div className="pager-controls">
+          <label className="pager-label">
+            Rows
+            <select
+              className="pager-select"
+              value={pageSize}
+              onChange={(e) => {
+                setPageSize(Number(e.target.value));
+                setPage(1);
+              }}
+            >
+              <option value={10}>10</option>
+              <option value={25}>25</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+            </select>
+          </label>
+          <button
+            className="btn btn-secondary"
+            onClick={() => setPage(Math.max(1, safePage - 1))}
+            disabled={safePage <= 1}
+          >
+            Prev
+          </button>
+          <span className="pager-info">Page {safePage} of {totalPages}</span>
+          <button
+            className="btn btn-secondary"
+            onClick={() => setPage(Math.min(totalPages, safePage + 1))}
+            disabled={safePage >= totalPages}
+          >
+            Next
+          </button>
+        </div>
       </div>
 
       <div className="table-wrap">
@@ -100,7 +142,7 @@ export default function RecommendationsTable({ rows, showAll, onRowClick, onDele
             </tr>
           </thead>
           <tbody>
-            {filtered.map((row, i) => (
+            {paged.map((row, i) => (
               <tr key={row.symbol + i} onClick={() => onRowClick(row.symbol)}>
                 {cols.map(c => (
                   <td key={c.key}>
