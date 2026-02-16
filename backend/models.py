@@ -96,6 +96,7 @@ class Recommendation(Base):
     recommended = Column(Boolean, default=False)
     score = Column(Float, default=0.0)
     reason = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
 
     scan = relationship("Scan", back_populates="recommendations")
     symbol = relationship("Symbol")

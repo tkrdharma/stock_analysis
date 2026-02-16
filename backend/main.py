@@ -97,6 +97,11 @@ def _read_symbols_file() -> List[str]:
 
 def _delete_all_records(db: Session) -> dict:
     """Delete all rows from all tables and return counts."""
+    global _scan_running, _scan_progress
+    # Clear in-memory scan state so a pending scan can't keep running after a wipe
+    _scan_running = False
+    _scan_progress.clear()
+
     deleted_logs = db.query(ScanLog).delete()
     deleted_recs = db.query(Recommendation).delete()
     deleted_tech = db.query(Technical).delete()
@@ -104,6 +109,23 @@ def _delete_all_records(db: Session) -> dict:
     deleted_scans = db.query(Scan).delete()
     deleted_symbols = db.query(Symbol).delete()
     db.commit()
+
+    # Immediately repopulate symbols from symbols.txt so the next Run Scan works without manual reload
+    reload_added = 0
+    reload_total = 0
+    try:
+        symbols = _read_symbols_file()
+        for s in symbols:
+            exists = db.query(Symbol).filter_by(symbol=s).first()
+            if not exists:
+                db.add(Symbol(symbol=s))
+                reload_added += 1
+        db.commit()
+        reload_total = db.query(Symbol).count()
+        logger.info("After clear-all: reloaded symbols.txt (%d added, %d total)", reload_added, reload_total)
+    except FileNotFoundError:
+        logger.warning("symbols.txt not found; symbols table left empty after clear-all")
+
     return {
         "scan_logs": deleted_logs,
         "recommendations": deleted_recs,
@@ -111,6 +133,8 @@ def _delete_all_records(db: Session) -> dict:
         "fundamentals": deleted_fund,
         "scans": deleted_scans,
         "symbols": deleted_symbols,
+        "symbols_reloaded": reload_added,
+        "symbols_total": reload_total,
     }
 
 
@@ -675,6 +699,7 @@ def latest_recommendations(db: Session = Depends(get_db)):
             "macd_divergence": macd_div,
             "score": rec.score,
             "reason": rec.reason,
+            "created_at": rec.created_at.isoformat() if rec.created_at else None,
         })
     return {
         "scan_id": scan.id,
@@ -732,6 +757,7 @@ def latest_all(db: Session = Depends(get_db)):
             "recommended": rec.recommended,
             "score": rec.score,
             "reason": rec.reason,
+            "created_at": rec.created_at.isoformat() if rec.created_at else None,
         })
     return {
         "scan_id": scan.id,
@@ -796,6 +822,7 @@ def symbol_details(
         "recommended": rec.recommended if rec else False,
         "score": rec.score if rec else 0,
         "reason": rec.reason if rec else "",
+        "created_at": rec.created_at.isoformat() if rec and rec.created_at else None,
     }
 
 

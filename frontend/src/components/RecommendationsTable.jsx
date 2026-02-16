@@ -8,12 +8,26 @@ const COLUMNS = [
   { key: 'debt', label: 'Debt', numeric: true },
   { key: 'rsi_divergence', label: 'RSI Divergence' },
   { key: 'macd_divergence', label: 'MACD Divergence' },
+  { key: 'created_at', label: 'Scanned At', datetime: true },
 ];
 
 function fmt(val, digits = 2) {
   if (val === null || val === undefined) return <span className="na">N/A</span>;
   if (typeof val === 'number') return val.toFixed(digits);
   return val;
+}
+
+function fmtDatetime(val) {
+  if (!val) return <span className="na">N/A</span>;
+  try {
+    const d = new Date(val);
+    return d.toLocaleString(undefined, {
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+  } catch {
+    return val;
+  }
 }
 
 export default function RecommendationsTable({ rows, showAll, onRowClick, onDelete }) {
@@ -148,9 +162,11 @@ export default function RecommendationsTable({ rows, showAll, onRowClick, onDele
                   <td key={c.key}>
                     {c.key === 'recommended'
                       ? (row[c.key] ? '✅' : '—')
-                      : c.numeric
-                        ? fmt(row[c.key])
-                        : (row[c.key] ?? <span className="na">N/A</span>)
+                      : c.datetime
+                        ? fmtDatetime(row[c.key])
+                        : c.numeric
+                          ? fmt(row[c.key])
+                          : (row[c.key] ?? <span className="na">N/A</span>)
                     }
                   </td>
                 ))}

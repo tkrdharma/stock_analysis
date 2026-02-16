@@ -140,6 +140,30 @@ export default function StockDetailsModal({ symbol, scanId, onClose }) {
               </div>
             </div>
 
+            {/* Scanned At */}
+            {data.created_at && (
+              <div className="modal-section">
+                <h3>Record Info</h3>
+                <div className="detail-grid">
+                  <div className="detail-item">
+                    <div className="label">Scanned At</div>
+                    <div className="value">
+                      {(() => {
+                        try {
+                          return new Date(data.created_at).toLocaleString(undefined, {
+                            year: 'numeric', month: 'short', day: 'numeric',
+                            hour: '2-digit', minute: '2-digit', second: '2-digit',
+                          });
+                        } catch {
+                          return data.created_at;
+                        }
+                      })()}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Reason */}
             {data.reason && (
               <div className="modal-section">
